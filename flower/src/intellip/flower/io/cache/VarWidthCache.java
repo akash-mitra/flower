@@ -7,6 +7,18 @@ import java.nio.channels.FileChannel;
 import java.util.LinkedList;
 import java.util.List;
 
+/**
+ * An object of class <tt>IndexCache</tt> takes an array of bytes as input
+ * through the <tt>put()</tt> method and returns a <tt>long</tt> handler.
+ * This handler can be thought of as the memory location where the input
+ * bytes are stored. The same handler can be passed to <tt>put()</tt> method
+ * which in turn returns back the array of bytes previously stored in that
+ * memory location.<br />
+ * Internally <tt>IndexCache</tt> uses memory mapped buffers to store and retrieve
+ * data from the file system. <tt>IndexCache</tt> creates two different files in 
+ * the disk - one for data cache and the other for index cache
+ */
+
 public class VarWidthCache extends Cache implements Closeable {
 	
 	private long bytePosition = 0;         // stores the current position in cache file from
@@ -26,10 +38,11 @@ public class VarWidthCache extends Cache implements Closeable {
 	}
 	
 	/* 
-	 * Below data structure implements a memory based index list.
-	 * Details of this data structure is given after the declaration below
+	 * Below data structures implement two memory based LRU cache to store 
+	 * data and index. Both data and index are persistently stored in disk but
+	 * memory based buffers are created in memory to enable faster access
 	 */
-	private List<ItemAddress> index = new LinkedList<ItemAddress>();
+	private LruCache<Integer, ItemAddress> lruIndexCache = new LruCache<Integer, ItemAddress>(5);
 	
 	/* 
 	 * Above index list resides in the Java Heap memory whereas actual 
