@@ -37,7 +37,7 @@ public abstract class Cache {
 		cacheType = "bin.cac";
 		cacheName = String.valueOf(Math.abs(UUID.randomUUID().getMostSignificantBits())) + "." + cacheType;
 		dataCacheFile = new RandomAccessFile(cachePath + cacheName, "rw");
-		blockSize = 1 << 26; // 64MB default
+		blockSize = 1 << 13; // 64MB default
 	}
 	public Cache(String path, long block_size) throws Exception  {
 		cachePath = path;
@@ -80,6 +80,10 @@ public abstract class Cache {
 	 * methods that are implemented fully in the abstract class
 	 * ------------------------------------------------------------------
 	 */
+	// returns the cache name (cache file name minus extension)
+	public String getCacheName() {
+		return cacheName.substring(1, 16);
+	}	 
 	// returns the cache file name
 	public String getCacheFileName() {
 		return cacheName;
@@ -102,7 +106,7 @@ public abstract class Cache {
 	 * Helper methods 
 	 * ------------------------------------------------------------------
 	 */
-	private boolean isValidPath(String path) {
+	protected boolean isValidPath(String path) {
 		File f = new File(path);
 		if (!f.exists()) 
 			return false;
