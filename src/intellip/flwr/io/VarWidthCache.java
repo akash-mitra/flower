@@ -8,42 +8,130 @@ import java.util.LinkedList;
 import java.util.List;
 
 /**
- * An object of class <tt>IndexCache</tt> takes an array of bytes as input
+ * <p>An object of class <tt>IndexCache</tt> takes an array of bytes as input
  * through the <tt>put()</tt> method and returns a <tt>long</tt> handler.
  * This handler can be thought of as the memory location where the input
  * bytes are stored. The same handler can be passed to <tt>put()</tt> method
  * which in turn returns back the array of bytes previously stored in that
- * memory location.<br />
- * Internally <tt>IndexCache</tt> uses memory mapped buffers to store and retrieve
- * data from the file system. <tt>IndexCache</tt> creates two different files in 
- * the disk - one for data cache and the other for index cache
+ * memory location.</p>
+ *
+ * <p>Internally, <tt>IndexCache</tt> uses <i>memory mapped buffers</i> to store and retrieve
+ * data to and from persistent data files. <tt>IndexCache</tt> creates two different 
+ * files in the disk - one for data cache and the other for index cache. Every time a 
+ * <tt>put()</tt> method is called both the data and index caches are updated. </p>
+ *
+ * <p>The class also implements a LRU cache mechanism when <tt>get()</tt> method is called.
+ * This LRU cache is built in memory and it only stores part or full of the index cache to help
+ * make the data access faster. Most recently accessed values of the index cache is stored 
+ * in the memory by evicting the least recently accessed values out of the LRU cache. 
+ * By default the size of the memory based LRU index cache is 128 MB. However this can be
+ * overridden during constructor invocation.</p>
+ * 
+ * <p>Considering the large number of parameters that need to be setup while calling the 
+ * constructor, this class implements a builder pattern that builds the cache parameters [EFFJ2, pp. 11].
+ * 
+ * 
+ * 
+ * <p>This class can be instantiated as a reader or writer. By default this class creates
+ * a writer object which can both read and write from the cache randomly. However by calling
+ * the <tt>InstantiateAsReader(String cacheFileName)</tt> method during invocation, the class
+ * can be invoked as a reader from an existing cache.</p>
  */
 
-public class VarWidthCache extends Cache implements Closeable {
+public class IndexCache extends Cache implements Closeable {
+
+   /* 
+	* bytePosition stores the current position in cache file from
+	* where to read or write data. This also indicates
+	* amount of bytes stored so far in the file
+	*/
+	private       long    bytePosition = 0;     	
+	private       int     nMap         = 0;     // number of maps so far created
+	private final String  IndexCacheName;       
+	private final long    LruCacheSize;
 	
-	private long bytePosition = 0;         // stores the current position in cache file from
-	                                       // where to read or write data. This also indicates
-	                                       // amount of bytes stored so far in the file
 	
-	private int  nMap         = 0;         // number of maps so far created
+	/* ************************************************************************
+	 * CONSTRUCTOR Section START
+	 * ************************************************************************/
+	 
+	public static class Builder {
 	
+		// mandatory parameters
+		private final String  DataCachePath;
+		private final String  IndexCachePath;
+		private final long    block_size;
+		
+		// optional parameters - initialized to default values where possible
+		private String  CacheName;
+		private boolean isReader     = false;
+		private long    LruCacheSize = 1 << 27; // 128MB
+		
+		// constructor for the builder
+		public Builder( String DataCachePath, String IndexCachePath, long block_size ) {
+			this.DataCachePath  = DataCachePath;
+			this.IndexCachePath = IndexCachePath;
+			this.block_size     = block_size;
+		}
+		
+		public Builder WithLRUCacheSize( long size )
+		{ LruCacheSize = size; return this; }
+		
+		public Builder SetAsReader( String CacheName ) { 
+			this.isReader  = true;
+			this.CacheName = CacheName; 
+			return this; 
+		}
+		
+		// invoke the private constructor of parent class and pass the builder
+		public IndexCache build() {
+			return new IndexCache(this);
+		}
+	}
+	
+	// private constructor - this can only be invoked from the Builder's build() method
+	private IndexCache(Builder builder) throws Exception {
+	
+		// do we need to invoke as a reader?
+		if (builder.isReader) {
+			super(builder.DataCachePath, builder.block_size, builder.CacheName);
+			
+			// determine the index cache name for the current index cache
+			// at this point we assume that the index cache is already existing
+			// if the assumption is incorrect, we throw exception
+			// index cache name is same as the data cache file name but with different file extension (.bin.idx)
+			this.IndexCacheName = builder.IndexCachePath + builder.CacheName + ".bin.idx"
+			if(!super.isValidPath(this.IndexCacheName)) throw new FileNotFoundException("Index cache file " + this.IndexCacheName + " not found!");
+		}
+		else {
+			super(builder.DataCachePath, builder.block_size);
+			this.IndexCacheName = builder.IndexCachePath + super.getCacheName() + ".bin.idx"
+		}
+	
+		this.LruCacheSize   = builder.LruCacheSize;
+	}
+
+	/* ************************************************************************
+	 * CONSTRUCTOR Section END
+	 * ************************************************************************/
+
 	// get a channel to the random access file
 	FileChannel ch            = dataCacheFile.getChannel();
-	
-	
+
+
 	// The below data structure represents one element in the index list
 	private class ItemAddress {
 		private long itemPos;              // at which position the item resides (first byte)
 		private int  itemSize;             // how many bytes is the address made of 
 	}
-	
+
 	/* 
 	 * Below data structures implement two memory based LRU cache to store 
 	 * data and index. Both data and index are persistently stored in disk but
 	 * memory based buffers are created in memory to enable faster access
 	 */
 	private LruCache<Integer, ItemAddress> lruIndexCache = new LruCache<Integer, ItemAddress>(5);
-	
+
 	/* 
 	 * Above index list resides in the Java Heap memory whereas actual 
 	 * items remain in the hard disk. The obvious advantage is accessing
@@ -63,35 +151,7 @@ public class VarWidthCache extends Cache implements Closeable {
 	 * LRU/MRU cache controller that silently page-out unused index to disk
 	 */
 
-	/* ************************************************************************
-	 * CONSTRUCTOR Section START
-	 * ************************************************************************/
-	
-	/** 
-	 * @param path Directory path where cache file will be written
-	 * @throws Exception
-	 */
-	public VarWidthCache(String path) throws Exception {
-		super(path);
-	}
 
-	public VarWidthCache(String path, long block_size) throws Exception {
-		super(path, block_size);
-	}
-
-	public VarWidthCache(String path, long block_size, String name)
-			throws Exception {
-		super(path, block_size, name);
-	}
-
-	public VarWidthCache(String path, long block_size, String name, String type)
-			throws Exception {
-		super(path, block_size, name, type);
-	}
-	
-	/* ************************************************************************
-	 * CONSTRUCTOR Section END
-	 * ************************************************************************/
 
 	@Override
 	public void close() throws IOException {
@@ -120,40 +180,40 @@ public class VarWidthCache extends Cache implements Closeable {
 	 */
 	@Override
 	public long set(byte[] bytes) throws IOException {
-		
+
 		// number of bytes to store
 		int BytesToStore = bytes.length;
-		
+
 		// calculate the gap value
 		// gap = (BytesToStore - ( nMap * blockSize - bytePosition ));
 		// check if gap is greater than zero
 		if ( BytesToStore > ( nMap * blockSize - bytePosition ))
-		
+
 		// Determine how many maps will be required for storing bytes
 		int NoOfMapsRequired  = (int) Math.ceil((double) BytesToStore / (double) blockSize);
-		
+
 		try {
 
 			for ( int i = 0; i <= NoOfMapsRequired; i++) {
-				
+
 				// create a mapped byte buffer
 				MappedByteBuffer mb = ch.map( FileChannel.MapMode.READ_WRITE, bytePosition, blockSize);
-				
+
 				// determine how many bytes to be written in this map
 				// this has to be minimum of free space in current map 
 				// or the buffer block size.
 				int length = blockSize > DataRemainInBytes ? DataRemainInBytes : blockSize;
 				mb.put(bytes, start, length);
-				
-				
+
+
 			}
-			
-			
+
+
 		} catch (IOException e) {
 			e.printStackTrace();
 			throw new RuntimeException(e);
 		}
-		
+
 		return 0;
 	}
 
