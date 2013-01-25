@@ -1,4 +1,4 @@
-package intellip.flwr.io.cache;
+package intellip.flower.io.cache;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -31,7 +31,6 @@ import java.util.List;
  * constructor, this class implements a builder pattern that builds the cache parameters [EFFJ2, pp. 11].
  * 
  * 
- * 
  * <p>This class can be instantiated as a reader or writer. By default this class creates
  * a writer object which can both read and write from the cache randomly. However by calling
  * the <tt>InstantiateAsReader(String cacheFileName)</tt> method during invocation, the class
@@ -40,14 +39,15 @@ import java.util.List;
 
 public class IndexCache extends Cache implements Closeable {
 
-   /* 
+       /* 
 	* bytePosition stores the current position in cache file from
 	* where to read or write data. This also indicates
 	* amount of bytes stored so far in the file
 	*/
 	private       long    bytePosition = 0;     	
 	private       int     nMap         = 0;     // number of maps so far created
-	private final String  IndexCacheName;       
+	private final String  IndexCachePath;   
+	private final String  IndexCacheName;    
 	private final long    LruCacheSize;
 	
 	
@@ -93,19 +93,22 @@ public class IndexCache extends Cache implements Closeable {
 	private IndexCache(Builder builder) throws Exception {
 	
 		// do we need to invoke as a reader?
-		if (builder.isReader) {
+		if (builder.isReader) { // existing index and data cache
 			super(builder.DataCachePath, builder.block_size, builder.CacheName);
 			
 			// determine the index cache name for the current index cache
 			// at this point we assume that the index cache is already existing
 			// if the assumption is incorrect, we throw exception
 			// index cache name is same as the data cache file name but with different file extension (.bin.idx)
-			this.IndexCacheName = builder.IndexCachePath + builder.CacheName + ".bin.idx"
-			if(!super.isValidPath(this.IndexCacheName)) throw new FileNotFoundException("Index cache file " + this.IndexCacheName + " not found!");
+			this.IndexCacheName = builder.CacheName;
+			this.IndexCachePath = builder.IndexCachePath;
+			if(!super.isValidPath(this.IndexCacheName + this.IndexCachePath + ".bin.idx")) 
+				throw new FileNotFoundException("Index cache file " + this.IndexCacheName + " not found!");
 		}
-		else {
+		else { // new index and data cache
 			super(builder.DataCachePath, builder.block_size);
-			this.IndexCacheName = builder.IndexCachePath + super.getCacheName() + ".bin.idx"
+			this.IndexCachePath = builder.IndexCachePath;
+			this.IndexCacheName = super.getCacheName();
 		}
 	
 		this.LruCacheSize   = builder.LruCacheSize;
@@ -115,42 +118,42 @@ public class IndexCache extends Cache implements Closeable {
 	 * CONSTRUCTOR Section END
 	 * ************************************************************************/
 
-	// get a channel to the random access file
-	FileChannel ch            = dataCacheFile.getChannel();
-
-
-	// The below data structure represents one element in the index list
+	/* The below data structure represents one element in the index list.
+	 * This class also has methods to serialize / deserialize the data into bytes
+	 *
+         * ItemAddress approximately takes 
+	 * 32 bytes of memory [ALGO4, pp. 201] - 8 byte for long, 4 byte for int, 
+	 * 16 byte object overhead and 4 byte of padding (for 8-byte machine-words 
+	 * on 64-bit machines)
+	 */
 	private class ItemAddress {
 		private long itemPos;              // at which position the item resides (first byte)
 		private int  itemSize;             // how many bytes is the address made of 
 	}
-
+	
+	
 	/* 
-	 * Below data structures implement two memory based LRU cache to store 
-	 * data and index. Both data and index are persistently stored in disk but
-	 * memory based buffers are created in memory to enable faster access
+	 * We will use constWidthCache to handle the index cache.
+	 * For data cache we will create the actual implementation
 	 */
-	private LruCache<Integer, ItemAddress> lruIndexCache = new LruCache<Integer, ItemAddress>(5);
+	ConstWidthCache idx = new ConstWidthCache(IndexCachePath, 1 << 13, IndexCacheName); // for index
+	FileChannel ch = dataCacheFile.getChannel();                                        // for data
 
 	/* 
-	 * Above index list resides in the Java Heap memory whereas actual 
+	 * Below data structures implement one memory based LRU cache to store 
+	 * index. Index is persistently stored in disk but
+	 * memory based buffers are created in memory to enable faster access
+	 * 
+	 * This index resides in the Java Heap memory whereas actual 
 	 * items remain in the hard disk. The obvious advantage is accessing
 	 * the index is much faster than accessing the data.
 	 * 
 	 * The biggest disadvantage of this approach is, index list (as opposed
 	 * to a disk based index file can not grow very big for obvious heap 
 	 * memory limitations. 
-	 * 
-	 * For example, ItemAddress approximately takes 
-	 * 32 bytes of memory [ALGO4, pp. 201] - 8 byte for long, 4 byte for int, 
-	 * 16 byte object overhead and 4 byte of padding (for 8-byte machine-words 
-	 * on 64-bit machines)
-	 * 
-	 * This means you can only store around 67 million items using a 2GB RAM.
-	 * Therefore it is obvious that such an index is backed-up using some
-	 * LRU/MRU cache controller that silently page-out unused index to disk
+	 *
 	 */
-
+	private LruCache<Integer, ItemAddress> lruIndexCache = new LruCache<Integer, ItemAddress>(LruCacheSize);
 
 
 	@Override
@@ -167,15 +170,15 @@ public class IndexCache extends Cache implements Closeable {
 	 * --------------------------------------------------------------------------
 	 * a) Find the "gap" using below formula:
 	 *    gap = Number of bytes to write - Space available in current map
-     * b) if gap is greater than 0, 
-     *    c) if the currentSpaceAvailable > 0, allocate currentSpaceAvailable amount of byte
-     *    d) Divide the above with map size, take ceil: 12/10 = 2
-     *    e) allocate block by block
-     *    f) recalculate currentSpaceAvailable = 8
-     * g) Else if gap is less than equal to 0, 
-     *    allocate in current map and recalculate remaining space in current map
-     * --------------------------------------------------------------------------
-     *    
+         * b) if gap is greater than 0, 
+     	 *    c) if the currentSpaceAvailable > 0, allocate currentSpaceAvailable amount of byte
+     	 *    d) Divide the above with map size, take ceil: 12/10 = 2
+     	 *    e) allocate block by block
+     	 *    f) recalculate currentSpaceAvailable = 8
+     	 * g) Else if gap is less than equal to 0, 
+     	 *    allocate in current map and recalculate remaining space in current map
+     	 * --------------------------------------------------------------------------
+     	 *    
 	 * @see cache.Cache#set(byte[])
 	 */
 	@Override
