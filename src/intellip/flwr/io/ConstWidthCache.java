@@ -1,6 +1,6 @@
-package intellip.flower.io.cache;
+package intellip.flwr.io;
 
-import intellip.flower.helper.Log;
+import intellip.flwr.util.Log;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -16,7 +16,7 @@ public class ConstWidthCache extends Cache implements Closeable {
 
 	private final List<MappedByteBuffer> mappings;
 	private int fixedBufferSize = 0;
-	
+	private long bytePosition = 0;
 	private int currentMapNumber = 0;
 	private int currentMapRemainingBytes = 0;
 	

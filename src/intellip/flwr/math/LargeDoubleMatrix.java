@@ -1,4 +1,4 @@
-package intellip.flower.math;
+package intellip.flwr.math;
 
 import sun.misc.Cleaner;
 import sun.nio.ch.DirectBuffer;

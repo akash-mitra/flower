@@ -1,4 +1,4 @@
-package intellip.flower.math;
+package intellip.flwr.math;
 
 import java.io.IOException;
 
