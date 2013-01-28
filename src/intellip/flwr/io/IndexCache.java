@@ -58,80 +58,84 @@ public class IndexCache implements Closeable {
 	private final String     IndexCacheName;                 // full-name of index cache
 	private final String     DataCacheName;                  // full-name of data cache
 	private final int        LruCacheSize;                   // size of LRU cache in memory
-	
-	
+
+
 	// Data Cache Related variables
 	private       long       lBytePosition;                  // amount of bytes stored so far
 	private final long       lBlockSize;                     // size of each memory mapped buffer block
 	private RandomAccessFile DataCacheFile;                  // handler for data cache file
-	private RandomAccessFile IndexCacheFile;                 // handler for data cache file
 	private final List<MappedByteBuffer> data_maps;          // list of maps in the data cache file
-	private final List<MappedByteBuffer> index_maps;         // list of maps in the data cache file
-	
-	
+
+
 	// index cache related variables
-	private ConstWidthCache idxCacHandler;                   // a constant width cache that stores the index
+	private RandomAccessFile IndexCacheFile;                 // handler for index cache file
+	private final List<MappedByteBuffer> index_maps;         // list of maps in the index cache file
 	// below data structure represents one element in the index list.
 	private class ItemAddress {                              // consumes 32 bytes, refer [ALGO4, pp. 201]
 		private long itemPos;                                // at which position the item resides (first byte)
 		private int  itemSize;                               // how many bytes is the address made of 
 	}
 	
-	
-	
-	
+	private long     lItemSeqNo;                             // number of items already loaded in data and index
+
+
 	/* ************************************************************************
 	 * Constructor uses builder pattern, Refer [EFFJ2, pp. 20]
 	 * ************************************************************************/
-	 
+
 	public static class Builder {
-	
+
 		// mandatory parameters
 		private final String  DataCachePath;
 		private final String  IndexCachePath;
-		private final long    block_size;
-		
+
 		// optional parameters - initialized to default values where possible
 		private String  CacheName;
 		private boolean isReader     = false;
 		private int     LruCacheSize = 1 << 27; // 128MB
 		private boolean isCompress   = false;
-		
+		private long    block_size   = 1 << 14; //  64KB
+
 		// constructor for the builder
-		public Builder( String DataCachePath, String IndexCachePath, long block_size ) {
+		public Builder( String DataCachePath, String IndexCachePath) {
 			this.DataCachePath  = DataCachePath;
 			this.IndexCachePath = IndexCachePath;
 			this.block_size     = block_size;
 		}
-		
+
 		public Builder withLRUCacheSize( int size ) { 
 			this.LruCacheSize = size; 
 			return this; 
 		}
 		
-		public Builder setAsReader( String CacheName ) { 
+		public Builder withBlockSize( long block_size ) { 
+			this.block_size = block_size;
+			return this;
+		}
+
+		public Builder useExistingFile( String CacheName ) { 
 			this.isReader  = true;
 			this.CacheName = CacheName; 
 			return this; 
 		}
-		
+
 		public Builder compressCache() {  
 			this.isCompress = true;
 			return this;
 		}
-		
+
 		// invoke the private constructor of parent class and pass the builder
 		public IndexCache build() throws Exception {
 			return new IndexCache(this);
 		}
 	}
-	
+
 	// private constructor - this can only be invoked from the Builder's build() method
 	private IndexCache(Builder builder) throws Exception {
-	
+
 		// do we need to invoke as a reader?
 		if (builder.isReader) { // existing index and data cache
-			
+
 			// determine existing cache files 
 			CacheName      = builder.CacheName;
 			isCompress     = builder.isCompress;
@@ -139,39 +143,44 @@ public class IndexCache implements Closeable {
 			DataCachePath  = builder.DataCachePath;
 			IndexCacheName = IndexCachePath + CacheName + (isCompress ? "zip.idx" : "bin.idx");
 			DataCacheName  = DataCachePath + CacheName + (isCompress ? "zip.cac" : "bin.cac");
-			
+
 			if(!isValidPath(IndexCacheName)) 
 				throw new FileNotFoundException("Index cache file " + IndexCacheName + " not found!");
 			if(!isValidPath(DataCacheName)) 
 				throw new FileNotFoundException("Data cache file " + DataCacheName + " not found!");
-			
+
 			DataCacheFile  = new RandomAccessFile(DataCacheName,  "r");
 			IndexCacheFile = new RandomAccessFile(IndexCacheName, "r");
+			
+			// TODO: Determine lItemSeqNo by dividing size of index cache with the size of one index element
 		}
 		else { // new index and data cache
-			
+
 			// generate random cache name
 			CacheName      = String.valueOf(Math.abs(UUID.randomUUID().getMostSignificantBits()));
 			isCompress     = builder.isCompress;
 			IndexCachePath = builder.IndexCachePath;
 			DataCachePath  = builder.DataCachePath;
-			
+
 			if(!isValidPath(IndexCachePath)) throw new FileNotFoundException("Path does not exist: " + IndexCachePath);
 			if(!isValidPath(DataCachePath))  throw new FileNotFoundException("Path does not exist: " + DataCachePath);
-			
+
 			IndexCacheName = IndexCachePath + CacheName + (isCompress ? "zip.idx" : "bin.idx");
 			DataCacheName  = DataCachePath  + CacheName + (isCompress ? "zip.cac" : "bin.cac");
-			
+
 			DataCacheFile  = new RandomAccessFile(DataCacheName,  "rw");
 			IndexCacheFile = new RandomAccessFile(IndexCacheName, "rw");
+			
+			lItemSeqNo     = 0; // so far no item has been put
 		}
-	
+
 		LruCacheSize       = builder.LruCacheSize;
 		lBlockSize         = builder.block_size;
 		lBytePosition      = 0;
 		data_maps          = new ArrayList<MappedByteBuffer>();
 		index_maps         = new ArrayList<MappedByteBuffer>();
-		
+		//isReadOnly         = builder.isReader;
+
 		Log.write("From inside, " + builder.DataCachePath);
 	}
 
@@ -185,17 +194,23 @@ public class IndexCache implements Closeable {
 	 * This method takes an array of bytes as input, writes it to the cache file and
 	 * returns a sequential number of <tt>long</tt> data type as an identifier for the 
 	 * array of bytes inserted. This sequential number can be passed to the <tt>get()</tt>
-	 * method to retrieve back the array of bytes.
-	 *   
+	 * method to retrieve back the array of bytes. <br />
+	 * <tt>put()</tt> can only be invoked on a writable cache. Writable caches are those that
+	 * are created exclusively 
 	 * @param bytes byte[] An array of bytes to store
 	 * @return handler long A sequential number that uniquely identifies the array of bytes stored
 	 */
-	
+	 
+	 /*
+	  * Put must be atomic - if one statement inside put fails, entire put fails and the consistency
+	  * of both index and data files are preserved.
+	  */
 	public long put( byte[] bytes ) {
+
 		
 		return 0;
 	}
-	
+
 	/*
 	 * Helper methods 
 	 * ------------------------------------------------------------------
@@ -206,19 +221,19 @@ public class IndexCache implements Closeable {
 			return false;
 		else return true;
 	}
-	
+
 	public void close() throws IOException {
         for (MappedByteBuffer mapping : data_maps)
             clean(mapping);
         DataCacheFile.close();
 	}
-	
+
     private void clean(MappedByteBuffer mapping) {
         if (mapping == null) return;
         Cleaner cleaner = ((DirectBuffer) mapping).cleaner();
         if (cleaner != null) cleaner.clean();
     }
-	
+
 	public static void main(String[] args) {
 		try {
 			IndexCache dd = new IndexCache.Builder("/Users/akash/", "/Users/akash/", 1 << 20).build();
