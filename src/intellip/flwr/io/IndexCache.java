@@ -210,6 +210,54 @@ public class IndexCache implements Closeable {
 		
 		return 0;
 	}
+	
+	public byte[] get ( long handler ) {
+		/* TODO:
+		 * Can we use scattered read here?
+		 * 
+		 */
+		// read the index
+		ItemAddress itemAddress = getItemAddress( handler );
+		
+		// how many bytes to read
+		int bytesToRead  = itemAddress.itemSize;
+		
+		// create a buffer where we store the retrieved data before returning
+		byte[] buffer = new byte[bytesToRead];
+		
+		// determine the data map number from where to start reading
+		int mapNo  = (int) Math.ceil( (double)itemAddress.itemPos / (double)lBlockSize );
+		
+		// determine the offset within a map from where to start reading data
+		int offset = (int) (itemAddress.itemPos % lBlockSize );
+		
+		// determine how many maps do we need to read
+		int noMapsToRead = (int) Math.ceil( (double)bytesToRead / (double)lBlockSize );
+		
+		int start = 0;
+		for ( int i = 1; i <= noMapsToRead; i++ ) {
+		
+			// set the position to the offset (the start point for reading data)
+			data_maps.get(mapNo).position(offset);
+		
+			// amount of data present in current map
+			int CurrentMapRemainingBytes = data_maps.get(mapNo).limit() - offset;
+			
+			// how many bytes to copy from current map
+			int len = Math.min(CurrentMapRemainingBytes, lBlockSize);
+			
+			// get(dst, start, length) method copies "length" bytes from map into the 
+			// buffer, starting at the current position of this map and at the given "start" 
+			// in the buffer. The position of this map is then also incremented by "length".
+			data_maps.get(mapNo).get(buffer, start, len);
+			
+			mapNo++;
+			offset = 0;
+			start += len;
+		}
+		
+		return buffer;
+	}
 
 	/*
 	 * Helper methods 
