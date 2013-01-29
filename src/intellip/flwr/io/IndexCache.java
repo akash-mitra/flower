@@ -100,7 +100,6 @@ public class IndexCache implements Closeable {
 		public Builder( String DataCachePath, String IndexCachePath) {
 			this.DataCachePath  = DataCachePath;
 			this.IndexCachePath = IndexCachePath;
-			this.block_size     = block_size;
 		}
 
 		public Builder withLRUCacheSize( int size ) { 
@@ -202,7 +201,7 @@ public class IndexCache implements Closeable {
 	 */
 	 
 	 /*
-	  * Put must be atomic - if one statement inside put fails, entire put fails and the consistency
+	  * Put() must be atomic - if one statement inside put fails, entire put fails and the consistency
 	  * of both index and data files are preserved.
 	  */
 	public long put( byte[] bytes ) {
@@ -284,7 +283,7 @@ public class IndexCache implements Closeable {
 
 	public static void main(String[] args) {
 		try {
-			IndexCache dd = new IndexCache.Builder("/Users/akash/", "/Users/akash/", 1 << 20).build();
+			IndexCache dd = new IndexCache.Builder("/Users/akash/", "/Users/akash/").build();
 			System.out.println("In");
 		} catch (Exception e) {
 			// TODO Auto-generated catch block
