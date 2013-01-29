@@ -1,5 +1,6 @@
 package intellip.flwr.io;
 
+import intellip.flwr.util.Base;
 import intellip.flwr.util.Log;
 
 import java.io.Closeable;
@@ -70,10 +71,43 @@ public class IndexCache implements Closeable {
 	// index cache related variables
 	private RandomAccessFile IndexCacheFile;                 // handler for index cache file
 	private final List<MappedByteBuffer> index_maps;         // list of maps in the index cache file
-	// below data structure represents one element in the index list.
+	
+	// below data structures represents one element in the index list.
+	private static final int INDEX_ENTRY_SIZE = 12;          // size of each entry in ItemAddress in bytes
 	private class ItemAddress {                              // consumes 32 bytes, refer [ALGO4, pp. 201]
-		private long itemPos;                                // at which position the item resides (first byte)
-		private int  itemSize;                               // how many bytes is the address made of 
+		
+		private final long itemPos;                          // at which position the item resides (first byte)
+		private final int  itemSize;                         // how many bytes is the address made of 
+		
+		public ItemAddress (byte[] dst) {
+			this.itemPos  = Base.bytesToLong(dst, 0, 8);
+			this.itemSize = Base.bytesToInt(dst, 8, 4);
+		}
+		public byte[] serialise() {
+			
+			// long is 8 byte and integer is 4 byte
+			// this means we need 12 byte of space theoretically
+			// to serialize the data in this structure
+			byte[] b = new byte[INDEX_ENTRY_SIZE];
+			
+			// convert long to byte
+			b[0] = (byte)(itemPos >>> 56);
+		    b[1] = (byte)(itemPos >>> 48);
+		    b[2] = (byte)(itemPos >>> 40);
+		    b[3] = (byte)(itemPos >>> 32);
+		    b[4] = (byte)(itemPos >>> 24);
+		    b[5] = (byte)(itemPos >>> 16);
+		    b[6] = (byte)(itemPos >>>  8);
+		    b[7] = (byte)(itemPos >>>  0);
+		    
+		    // convert integer to byte
+		    b[8]  = (byte)(itemSize >>> 24);
+		    b[9]  = (byte)(itemSize >>> 16);
+		    b[10] = (byte)(itemSize >>>  8);
+		    b[11] = (byte)(itemSize >>>  0);
+			
+			return b;
+		}
 	}
 	
 	private long     lItemSeqNo;                             // number of items already loaded in data and index
@@ -143,9 +177,9 @@ public class IndexCache implements Closeable {
 			IndexCacheName = IndexCachePath + CacheName + (isCompress ? "zip.idx" : "bin.idx");
 			DataCacheName  = DataCachePath + CacheName + (isCompress ? "zip.cac" : "bin.cac");
 
-			if(!isValidPath(IndexCacheName)) 
+			if(!Base.isValidPath(IndexCacheName)) 
 				throw new FileNotFoundException("Index cache file " + IndexCacheName + " not found!");
-			if(!isValidPath(DataCacheName)) 
+			if(!Base.isValidPath(DataCacheName)) 
 				throw new FileNotFoundException("Data cache file " + DataCacheName + " not found!");
 
 			DataCacheFile  = new RandomAccessFile(DataCacheName,  "r");
@@ -161,8 +195,8 @@ public class IndexCache implements Closeable {
 			IndexCachePath = builder.IndexCachePath;
 			DataCachePath  = builder.DataCachePath;
 
-			if(!isValidPath(IndexCachePath)) throw new FileNotFoundException("Path does not exist: " + IndexCachePath);
-			if(!isValidPath(DataCachePath))  throw new FileNotFoundException("Path does not exist: " + DataCachePath);
+			if(!Base.isValidPath(IndexCachePath)) throw new FileNotFoundException("Path does not exist: " + IndexCachePath);
+			if(!Base.isValidPath(DataCachePath))  throw new FileNotFoundException("Path does not exist: " + DataCachePath);
 
 			IndexCacheName = IndexCachePath + CacheName + (isCompress ? "zip.idx" : "bin.idx");
 			DataCacheName  = DataCachePath  + CacheName + (isCompress ? "zip.cac" : "bin.cac");
@@ -212,8 +246,8 @@ public class IndexCache implements Closeable {
 	
 	public byte[] get ( long handler ) {
 		/* TODO:
-		 * Can we use scattered read here?
-		 * 
+		 * - Can we use scattered read here?
+		 * - Validate handler input
 		 */
 		// read the index
 		ItemAddress itemAddress = getItemAddress( handler );
@@ -243,7 +277,7 @@ public class IndexCache implements Closeable {
 			int CurrentMapRemainingBytes = data_maps.get(mapNo).limit() - offset;
 			
 			// how many bytes to copy from current map
-			int len = Math.min(CurrentMapRemainingBytes, lBlockSize);
+			int len = (int) Math.min(CurrentMapRemainingBytes, lBlockSize);
 			
 			// get(dst, start, length) method copies "length" bytes from map into the 
 			// buffer, starting at the current position of this map and at the given "start" 
@@ -258,24 +292,39 @@ public class IndexCache implements Closeable {
 		return buffer;
 	}
 
+	private ItemAddress getItemAddress(long handler) {
+		/*
+		 * TODO: Add LRU Cache
+		 */
+		
+		byte[] dst = new byte[INDEX_ENTRY_SIZE];
+		
+		// determine the map number in which this index resides
+		// one index entry is 12 byte long, hence one map can store 
+		// lBlockSize/12 index entries
+		
+		int indxMapNo = (int) Math.ceil((double)handler * (double)INDEX_ENTRY_SIZE / (double)lBlockSize);
+		int pos       = (int) Math.ceil((double)(handler-1) * (double)INDEX_ENTRY_SIZE / (double)lBlockSize);
+		
+		index_maps.get(indxMapNo).position(pos);
+		index_maps.get(indxMapNo).get(dst);
+		
+		return new ItemAddress(dst);
+	}
+
+
 	/*
 	 * Helper methods 
 	 * ------------------------------------------------------------------
 	 */
-	protected boolean isValidPath(String path) {
-		File f = new File(path);
-		if (!f.exists()) 
-			return false;
-		else return true;
-	}
 
 	public void close() throws IOException {
         for (MappedByteBuffer mapping : data_maps)
-            clean(mapping);
+            _clean(mapping);
         DataCacheFile.close();
 	}
 
-    private void clean(MappedByteBuffer mapping) {
+    private void _clean(MappedByteBuffer mapping) {
         if (mapping == null) return;
         Cleaner cleaner = ((DirectBuffer) mapping).cleaner();
         if (cleaner != null) cleaner.clean();
