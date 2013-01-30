@@ -44,7 +44,7 @@ import sun.nio.ch.DirectBuffer;
  * 
  * <p>This class can be instantiated as a reader or writer. By default this class creates
  * a writer object which can both read and write from the cache randomly. However by calling
- * the <tt>InstantiateAsReader(String cacheFileName)</tt> method during invocation, the class
+ * the <tt>useExistingFile(String CacheName)</tt> method during invocation, the class
  * can be invoked as a reader from an existing cache.</p>
  */
 
@@ -71,25 +71,39 @@ public class IndexCache implements Closeable {
 	// index cache related variables
 	private RandomAccessFile IndexCacheFile;                 // handler for index cache file
 	private final List<MappedByteBuffer> index_maps;         // list of maps in the index cache file
-	
+
 	// below data structures represents one element in the index list.
 	private static final int INDEX_ENTRY_SIZE = 12;          // size of each entry in ItemAddress in bytes
 	private class ItemAddress {                              // consumes 32 bytes, refer [ALGO4, pp. 201]
-		
+
 		private final long itemPos;                          // at which position the item resides (first byte)
 		private final int  itemSize;                         // how many bytes is the address made of 
-		
+
 		public ItemAddress (byte[] dst) {
 			this.itemPos  = Base.bytesToLong(dst, 0, 8);
 			this.itemSize = Base.bytesToInt(dst, 8, 4);
 		}
+		
+		public ItemAddress (long pos, int size) {
+			this.itemPos  = pos;
+			this.itemSize = size;
+		}
+		
+		public long getPosition() {
+			return itemPos;
+		}
+		
+		public int getSize() {
+			return itemSize;
+		}
+		
 		public byte[] serialise() {
-			
+
 			// long is 8 byte and integer is 4 byte
 			// this means we need 12 byte of space theoretically
 			// to serialize the data in this structure
 			byte[] b = new byte[INDEX_ENTRY_SIZE];
-			
+
 			// convert long to byte
 			b[0] = (byte)(itemPos >>> 56);
 		    b[1] = (byte)(itemPos >>> 48);
@@ -99,19 +113,43 @@ public class IndexCache implements Closeable {
 		    b[5] = (byte)(itemPos >>> 16);
 		    b[6] = (byte)(itemPos >>>  8);
 		    b[7] = (byte)(itemPos >>>  0);
-		    
+
 		    // convert integer to byte
 		    b[8]  = (byte)(itemSize >>> 24);
 		    b[9]  = (byte)(itemSize >>> 16);
 		    b[10] = (byte)(itemSize >>>  8);
 		    b[11] = (byte)(itemSize >>>  0);
-			
+
 			return b;
 		}
 	}
 	
-	private long     lItemSeqNo;                             // number of items already loaded in data and index
+	// below data structure represents the construct of cache header
+	private static final int FIXED_HEADER_SIZE = 48; 
+	private class Header {
+	
+		private long   BlockSize; // 8 byte
+		private char[] fileName;      // 32 byte
+		private long   createDate;     // 8 byte
+		
+		public IndexHeader ( byte[] b ) {
+			this.BlockSize  = Base.bytesToLong (b, 0,  8);
+			this.fileName   = Base.bytesToChars(b, 8,  40);
+			this.createDate = Base.bytesToLong (b, 40, 48);
+		}
+		
+		public long getBlockSize () { return this.BlockSize; }
+		public long getName ()      { return this.fileName;  }
+		public long getCreateDate() { return this.createDate;}
+		
+		public byte[] serialise() {} // TODO
+	}
 
+	// cache, data and memory map handler related variables
+	private long     lItemSeqNo;                             // number of items already loaded in data and index
+	private long     CurrentMapRemainingByte;                // space remaining in the lastly added map in bytes
+	private long     dataWrittenSoFar;                       // total amount of data written in data cache so far in bytes
+	private int      CurrentMap;                             // serial number of last map added. (no of maps added so far in data cache)
 
 	/* ************************************************************************
 	 * Constructor uses builder pattern, Refer [EFFJ2, pp. 20]
@@ -140,7 +178,7 @@ public class IndexCache implements Closeable {
 			this.LruCacheSize = size; 
 			return this; 
 		}
-		
+
 		public Builder withBlockSize( long block_size ) { 
 			this.block_size = block_size;
 			return this;
@@ -165,7 +203,13 @@ public class IndexCache implements Closeable {
 
 	// private constructor - this can only be invoked from the Builder's build() method
 	private IndexCache(Builder builder) throws Exception {
-
+		
+		LruCacheSize       = builder.LruCacheSize;
+		lBytePosition      = 0;
+		data_maps          = new ArrayList<MappedByteBuffer>();
+		index_maps         = new ArrayList<MappedByteBuffer>();
+		lBlockSize         = builder.block_size;
+		
 		// do we need to invoke as a reader?
 		if (builder.isReader) { // existing index and data cache
 
@@ -182,10 +226,40 @@ public class IndexCache implements Closeable {
 			if(!Base.isValidPath(DataCacheName)) 
 				throw new FileNotFoundException("Data cache file " + DataCacheName + " not found!");
 
-			DataCacheFile  = new RandomAccessFile(DataCacheName,  "r");
-			IndexCacheFile = new RandomAccessFile(IndexCacheName, "r");
+			DataCacheFile  = new RandomAccessFile(DataCacheName,  "rw");
+			IndexCacheFile = new RandomAccessFile(IndexCacheName, "rw");
 			
-			// TODO: Determine lItemSeqNo by dividing size of index cache with the size of one index element
+			// read the header to find out blocksize
+			Header indhead = ReadHeader( IndexCacheFile );
+			
+			// TODO: Header consistency check - hash comparison, cache name same etc.
+			
+			lBlockSize     = indhead.getBlockSize();
+			
+			// next we will map the entire index from the file to mapped byte buffers
+			int fileSize   = IndexCacheFile.size();     // determine full file size
+			int NoOfMaps   = (fileSize - FIXED_HEADER_SIZE) / lBlockSize;
+			for (int i = 0; i < NoOfMaps; i++) {
+				MappedByteBuffer m = IndexCacheFile.getChannel().map(FileChannel.MapMode.READ_WRITE, FIXED_HEADER_SIZE + lBlockSize * i, lBlockSize * (i + 1));
+				
+				index_maps.add(m);
+			}
+			lItemSeqNo = (fileSize - FIXED_HEADER_SIZE) / INDEX_ENTRY_SIZE;
+			
+			// next we will map the entire data from the file to mapped byte buffers
+			fileSize   = DataCacheFile.size();     // determine full file size
+			NoOfMaps   = (fileSize - FIXED_HEADER_SIZE) / lBlockSize;
+			for (int i = 0; i < NoOfMaps; i++) {
+				m = DataCacheFile.getChannel().map(FileChannel.MapMode.READ_WRITE, FIXED_HEADER_SIZE + lBlockSize * i, lBlockSize * (i + 1));
+				
+				data_maps.add(m);
+			}
+			
+			CurrentMap              = NoOfMaps;
+			CurrentMapRemainingByte = m.capacity() - m.limit();
+			dataWrittenSoFar        = (NoOfMaps - 1) * lBlockSize + m.limit();
+			m = null;
+			
 		}
 		else { // new index and data cache
 
@@ -203,15 +277,12 @@ public class IndexCache implements Closeable {
 
 			DataCacheFile  = new RandomAccessFile(DataCacheName,  "rw");
 			IndexCacheFile = new RandomAccessFile(IndexCacheName, "rw");
-			
-			lItemSeqNo     = 0; // so far no item has been put
-		}
 
-		LruCacheSize       = builder.LruCacheSize;
-		lBlockSize         = builder.block_size;
-		lBytePosition      = 0;
-		data_maps          = new ArrayList<MappedByteBuffer>();
-		index_maps         = new ArrayList<MappedByteBuffer>();
+			lItemSeqNo     = 0; // so far no item has been put
+			CurrentMap     = 0;
+			CurrentMapRemainingByte = 0;
+			dataWrittenSoFar        = 0;
+		}
 		//isReadOnly         = builder.isReader;
 
 		Log.write("From inside, " + builder.DataCachePath);
@@ -233,82 +304,153 @@ public class IndexCache implements Closeable {
 	 * @param bytes byte[] An array of bytes to store
 	 * @return handler long A sequential number that uniquely identifies the array of bytes stored
 	 */
-	 
+
 	 /*
 	  * Put() must be atomic - if one statement inside put fails, entire put fails and the consistency
 	  * of both index and data files are preserved.
 	  */
 	public long put( byte[] bytes ) {
-
 		
-		return 0;
+		//TODO validate the input
+		//
+		int level = 0;               // helps to identify the roll-back point
+		int len   = bytes.length;
+		
+		// can the bytes be put in current map
+		if (CurrentMapRemainingByte >= len) {
+			try {
+				// construct one index entry
+				ItemAddress index = new ItemAddress(dataWrittenSoFar, len);
+				
+				// insert the original data
+				level = 1;
+				data_maps.get(CurrentMap).put(bytes); // THIS NEEDS TO CHANGE TO ABSOLUTE PUT!!!!
+				dataWrittenSoFar += len;
+				CurrentMapRemainingByte -= len;
+				
+				// insert the index
+				level = 20;
+				_setItemAddress ( index.serialise() );
+				
+				lItemSeqNo += 1;
+				return lItemSeqNo;
+			}
+			catch (Exception e) {
+				e.printStackTrace();
+			}
+			finally {
+				// Rollback baby! Fun is over!
+			}
+		}
+		else {  // we need new map!
+			    // but we will try to put as much as we can in
+				// current map first before creating a new map
+			
+			// create index construct
+			ItemAddress index = new ItemAddress(dataWrittenSoFar, len);		
+			
+			if (CurrentMapRemainingByte > 0) {
+				// insert part of original data
+				level = 1;
+				byte[] partialData = Arrays.copyOf(bytes, CurrentMapRemainingByte);
+				data_maps.get(CurrentMap).put(partialData); // THIS NEEDS TO CHANGE TO ABSOLUTE PUT!!!!
+				
+				// calculate remaining data
+				len = bytes.length
+				bytes = Arrays.copyOfRange(bytes, CurrentMapRemainingByte, len);
+			}
+			
+			// how many maps do we need
+			level = 2;
+			int mapsNeeded = (int) Math.ceil( (double)bytes / (double)lBlockSize );
+			MappedByteBuffer m;
+			for (int i = 0; i < mapsNeeded; i++) {
+				m = DataCacheFile.getChannel().map(FileChannel.MapMode.READ_WRITE, (lItemSeqNo + i) * lBlockSize, lBlockSize);
+				m.put(bytes, 0, Math.min(bytes.length, lBlockSize));
+				index_maps.add(m);
+				len = bytes.length
+				bytes = Arrays.copyOfRange(bytes, Math.min(bytes.length, lBlockSize), len);
+			}
+			
+			// add index
+			level = 20;
+			_setItemAddress ( index.serialise() );
+			lItemSeqNo++;
+			
+			return lItemSeqNo;
+		}
+		// control reaches here only if some error has occured
+		return -1;  
 	}
-	
+
 	public byte[] get ( long handler ) {
 		/* TODO:
 		 * - Can we use scattered read here?
 		 * - Validate handler input
 		 */
 		// read the index
-		ItemAddress itemAddress = getItemAddress( handler );
-		
+		ItemAddress itemAddress = _getItemAddress( handler );
+
 		// how many bytes to read
-		int bytesToRead  = itemAddress.itemSize;
-		
+		int bytesToRead  = itemAddress.getSize();
+
 		// create a buffer where we store the retrieved data before returning
 		byte[] buffer = new byte[bytesToRead];
-		
+
 		// determine the data map number from where to start reading
-		int mapNo  = (int) Math.ceil( (double)itemAddress.itemPos / (double)lBlockSize );
-		
+		int mapNo  = (int) Math.ceil( (double)itemAddress.getPosition() / (double)lBlockSize );
+
 		// determine the offset within a map from where to start reading data
-		int offset = (int) (itemAddress.itemPos % lBlockSize );
-		
+		int offset = (int) (itemAddress.getPosition() % lBlockSize );
+
 		// determine how many maps do we need to read
 		int noMapsToRead = (int) Math.ceil( (double)bytesToRead / (double)lBlockSize );
-		
+
 		int start = 0;
 		for ( int i = 1; i <= noMapsToRead; i++ ) {
-		
+
 			// set the position to the offset (the start point for reading data)
 			data_maps.get(mapNo).position(offset);
-		
+
 			// amount of data present in current map
-			int CurrentMapRemainingBytes = data_maps.get(mapNo).limit() - offset;
-			
+			int DataToReadFromThisMap = data_maps.get(mapNo).limit() - offset;
+
 			// how many bytes to copy from current map
-			int len = (int) Math.min(CurrentMapRemainingBytes, lBlockSize);
-			
+			int len = (int) Math.min(DataToReadFromThisMap, lBlockSize);
+
 			// get(dst, start, length) method copies "length" bytes from map into the 
 			// buffer, starting at the current position of this map and at the given "start" 
 			// in the buffer. The position of this map is then also incremented by "length".
 			data_maps.get(mapNo).get(buffer, start, len);
-			
+
 			mapNo++;
 			offset = 0;
 			start += len;
 		}
-		
+
 		return buffer;
 	}
-
-	private ItemAddress getItemAddress(long handler) {
+	
+	private long _setItemAddress(byte[] bytes) {
+		// increment lItemSeqNo
+	}
+	private ItemAddress _getItemAddress(long handler) {
 		/*
 		 * TODO: Add LRU Cache
 		 */
-		
+
 		byte[] dst = new byte[INDEX_ENTRY_SIZE];
-		
+
 		// determine the map number in which this index resides
 		// one index entry is 12 byte long, hence one map can store 
 		// lBlockSize/12 index entries
-		
+
 		int indxMapNo = (int) Math.ceil((double)handler * (double)INDEX_ENTRY_SIZE / (double)lBlockSize);
 		int pos       = (int) Math.ceil((double)(handler-1) * (double)INDEX_ENTRY_SIZE / (double)lBlockSize);
-		
+
 		index_maps.get(indxMapNo).position(pos);
 		index_maps.get(indxMapNo).get(dst);
-		
+
 		return new ItemAddress(dst);
 	}
 
