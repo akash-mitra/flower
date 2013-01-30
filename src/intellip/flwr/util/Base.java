@@ -57,11 +57,31 @@ public final class Base {
 	   return val;
 	}
 	
+	public static char[] bytesToChars(byte[] bytes, int offset, int len) {
+		
+		if (len % 2 != 0) return null;
+		char[] buffer = new char[len >> 1];
+		
+		for(int i = 0; i < len; i++) 
+		{
+		 int bpos = i << 1;
+		 char c = (char)(((bytes[offset + bpos]&0x00FF)<<8) + (bytes[offset + bpos + 1]&0x00FF));
+		 buffer[i] = c;
+		}
+		return buffer;
+	}
 	
+	
+	public static final long getLongDate() { //TODO
+		long dt = 20130130; 
+		return dt;
+	}
 	public static boolean isValidPath(String path) {
 		File f = new File(path);
 		if (!f.exists()) 
 			return false;
 		else return true;
 	}
+
+
 }

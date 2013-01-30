@@ -11,6 +11,7 @@ import java.io.RandomAccessFile;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.UUID;
@@ -125,24 +126,63 @@ public class IndexCache implements Closeable {
 	}
 	
 	// below data structure represents the construct of cache header
-	private static final int FIXED_HEADER_SIZE = 48; 
+	private static final int FIXED_HEADER_SIZE = 24; 
 	private class Header {
 	
-		private long   BlockSize; // 8 byte
-		private char[] fileName;      // 32 byte
-		private long   createDate;     // 8 byte
+		private long   BlockSize;     // 8 byte
+		private long   fileName;      // 8 byte
+		private long   createDate;    // 8 byte
 		
-		public IndexHeader ( byte[] b ) {
+		public Header (byte[] b) {
 			this.BlockSize  = Base.bytesToLong (b, 0,  8);
-			this.fileName   = Base.bytesToChars(b, 8,  40);
-			this.createDate = Base.bytesToLong (b, 40, 48);
+			this.fileName   = Base.bytesToLong (b, 8,  8);
+			this.createDate = Base.bytesToLong (b, 16, 8);
+		}
+		
+		public Header (long cacheName, long blockSize) {
+			this.BlockSize  = blockSize;
+			this.fileName   = cacheName;
+			this.createDate = Base.getLongDate();
 		}
 		
 		public long getBlockSize () { return this.BlockSize; }
 		public long getName ()      { return this.fileName;  }
 		public long getCreateDate() { return this.createDate;}
 		
-		public byte[] serialise() {} // TODO
+		public byte[] serialise() {
+			// long is 8 byte
+			// this means we need 24 bytes of space
+			byte[] b = new byte[FIXED_HEADER_SIZE];
+
+			// convert long to byte
+			b[0]  = (byte)(BlockSize  >>> 56);
+		    b[1]  = (byte)(BlockSize  >>> 48);
+		    b[2]  = (byte)(BlockSize  >>> 40);
+		    b[3]  = (byte)(BlockSize  >>> 32);
+		    b[4]  = (byte)(BlockSize  >>> 24);
+		    b[5]  = (byte)(BlockSize  >>> 16);
+		    b[6]  = (byte)(BlockSize  >>>  8);
+		    b[7]  = (byte)(BlockSize  >>>  0);
+		    
+		    b[8]  = (byte)(fileName   >>> 56);
+		    b[9]  = (byte)(fileName   >>> 48);
+		    b[10] = (byte)(fileName   >>> 40);
+		    b[11] = (byte)(fileName   >>> 32);
+		    b[12] = (byte)(fileName   >>> 24);
+		    b[13] = (byte)(fileName   >>> 16);
+		    b[14] = (byte)(fileName   >>>  8);
+		    b[15] = (byte)(fileName   >>>  0);
+		    
+		    b[16] = (byte)(createDate >>> 56);
+		    b[17] = (byte)(createDate >>> 48);
+		    b[18] = (byte)(createDate >>> 40);
+		    b[19] = (byte)(createDate >>> 32);
+		    b[20] = (byte)(createDate >>> 24);
+		    b[21] = (byte)(createDate >>> 16);
+		    b[22] = (byte)(createDate >>>  8);
+		    b[23] = (byte)(createDate >>>  0);
+		    
+			return b;} // TODO
 	}
 
 	// cache, data and memory map handler related variables
@@ -235,27 +275,27 @@ public class IndexCache implements Closeable {
 			// TODO: Header consistency check - hash comparison, cache name same etc.
 			
 			lBlockSize     = indhead.getBlockSize();
-			
+			MappedByteBuffer m;
 			// next we will map the entire index from the file to mapped byte buffers
-			int fileSize   = IndexCacheFile.size();     // determine full file size
-			int NoOfMaps   = (fileSize - FIXED_HEADER_SIZE) / lBlockSize;
+			long fileSize   = IndexCacheFile.getChannel().size();     // determine full file size
+			long NoOfMaps   = (fileSize - FIXED_HEADER_SIZE) / lBlockSize;
 			for (int i = 0; i < NoOfMaps; i++) {
-				MappedByteBuffer m = IndexCacheFile.getChannel().map(FileChannel.MapMode.READ_WRITE, FIXED_HEADER_SIZE + lBlockSize * i, lBlockSize * (i + 1));
+				m = IndexCacheFile.getChannel().map(FileChannel.MapMode.READ_WRITE, FIXED_HEADER_SIZE + lBlockSize * i, lBlockSize * (i + 1));
 				
 				index_maps.add(m);
 			}
 			lItemSeqNo = (fileSize - FIXED_HEADER_SIZE) / INDEX_ENTRY_SIZE;
 			
 			// next we will map the entire data from the file to mapped byte buffers
-			fileSize   = DataCacheFile.size();     // determine full file size
-			NoOfMaps   = (fileSize - FIXED_HEADER_SIZE) / lBlockSize;
+			fileSize   = DataCacheFile.getChannel().size();     // determine full file size
+			NoOfMaps   = (int) ((fileSize - FIXED_HEADER_SIZE) / lBlockSize);
 			for (int i = 0; i < NoOfMaps; i++) {
 				m = DataCacheFile.getChannel().map(FileChannel.MapMode.READ_WRITE, FIXED_HEADER_SIZE + lBlockSize * i, lBlockSize * (i + 1));
 				
 				data_maps.add(m);
 			}
 			
-			CurrentMap              = NoOfMaps;
+			CurrentMap              = (int) NoOfMaps;
 			CurrentMapRemainingByte = m.capacity() - m.limit();
 			dataWrittenSoFar        = (NoOfMaps - 1) * lBlockSize + m.limit();
 			m = null;
@@ -264,7 +304,8 @@ public class IndexCache implements Closeable {
 		else { // new index and data cache
 
 			// generate random cache name
-			CacheName      = String.valueOf(Math.abs(UUID.randomUUID().getMostSignificantBits()));
+			long cacheLong = Math.abs(UUID.randomUUID().getMostSignificantBits());
+			CacheName      = String.valueOf(cacheLong);
 			isCompress     = builder.isCompress;
 			IndexCachePath = builder.IndexCachePath;
 			DataCachePath  = builder.DataCachePath;
@@ -277,6 +318,10 @@ public class IndexCache implements Closeable {
 
 			DataCacheFile  = new RandomAccessFile(DataCacheName,  "rw");
 			IndexCacheFile = new RandomAccessFile(IndexCacheName, "rw");
+			
+			// create the header in the index file
+			Header header = new Header (cacheLong, lBlockSize);
+			writeHeader(IndexCacheFile, header.serialise());
 
 			lItemSeqNo     = 0; // so far no item has been put
 			CurrentMap     = 0;
@@ -291,7 +336,6 @@ public class IndexCache implements Closeable {
 	/* ************************************************************************
 	 * CONSTRUCTOR Section END
 	 * ************************************************************************/
-
 
 
 	/**
@@ -362,14 +406,14 @@ public class IndexCache implements Closeable {
 			
 			// how many maps do we need
 			level = 2;
-			int mapsNeeded = (int) Math.ceil( (double)bytes / (double)lBlockSize );
+			int mapsNeeded = (int) Math.ceil( (double)bytes.length / (double)lBlockSize );
 			MappedByteBuffer m;
 			for (int i = 0; i < mapsNeeded; i++) {
 				m = DataCacheFile.getChannel().map(FileChannel.MapMode.READ_WRITE, (lItemSeqNo + i) * lBlockSize, lBlockSize);
-				m.put(bytes, 0, Math.min(bytes.length, lBlockSize));
+				m.put(bytes, 0, (int) Math.min(bytes.length, lBlockSize));
 				index_maps.add(m);
-				len = bytes.length
-				bytes = Arrays.copyOfRange(bytes, Math.min(bytes.length, lBlockSize), len);
+				len = bytes.length;
+				bytes = Arrays.copyOfRange(bytes, (int) Math.min(bytes.length, lBlockSize), len);
 			}
 			
 			// add index
@@ -432,6 +476,7 @@ public class IndexCache implements Closeable {
 	}
 	
 	private long _setItemAddress(byte[] bytes) {
+		return 0;
 		// increment lItemSeqNo
 	}
 	private ItemAddress _getItemAddress(long handler) {
@@ -454,6 +499,25 @@ public class IndexCache implements Closeable {
 		return new ItemAddress(dst);
 	}
 
+
+
+
+	private Header ReadHeader(RandomAccessFile file) throws IOException {
+		
+		byte[] headData = new byte[FIXED_HEADER_SIZE];
+		
+		file.seek(0);
+		file.read(headData);
+		// file.close();
+		
+		return new Header(headData);
+	}
+	
+	private void writeHeader(RandomAccessFile file, byte[] bytes) throws IOException {
+		
+		file.write(bytes);
+		// file.close();
+	}
 
 	/*
 	 * Helper methods 
