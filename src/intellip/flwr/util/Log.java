@@ -2,10 +2,10 @@ package intellip.flwr.util;
 
 public final class Log {
 	
-	private static final int DEFAULT_VERBOSE_LEVEL = 3; // verbose 
-	public static final int NORMAL                 = 2;
-	public static final int VERBOSE                = 3;
-	public static final int VERBOSE_DATA           = 4;
+	private static final int DEFAULT_VERBOSE_LEVEL  = 3; // verbose 
+	public  static final int NORMAL                 = 2;
+	public  static final int VERBOSE                = 3;
+	public  static final int VERBOSE_DATA           = 4;
 	// private constructor
 	private Log() {
 		throw new AssertionError();
