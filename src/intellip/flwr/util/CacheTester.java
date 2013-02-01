@@ -1,6 +1,6 @@
 public class CacheTester {
   
-	private static final String CACHE_PATH = "/Users/Akash/temp/";
+	private static final String CACHE_PATH = "/Users/Akash/temp";
 	
 	IndexCache cache_new   = null;
 	IndexCache cache_exist = null;
