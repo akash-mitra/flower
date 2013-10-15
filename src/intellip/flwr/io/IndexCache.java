@@ -8,6 +8,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.io.UnsupportedEncodingException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
@@ -415,6 +416,8 @@ public class IndexCache implements Closeable {
 				
 				// construct one index entry
 				ItemAddress index = new ItemAddress(dataWrittenSoFar, len);
+				// DEBUG
+				System.out.print("[1pos = " + dataWrittenSoFar + ", len = " + len + "]");
 
 				// insert the original data
 				level = 1;
@@ -424,6 +427,7 @@ public class IndexCache implements Closeable {
 
 				// insert the index
 				level = 20;
+				
 				_setItemAddress ( index.serialise() );
 				return NoOfEntryInIndex;
 			}
@@ -439,7 +443,9 @@ public class IndexCache implements Closeable {
 				// current map first before creating a new map
 
 			// create index construct
-			ItemAddress index = new ItemAddress(dataWrittenSoFar, len);		
+			ItemAddress index = new ItemAddress(dataWrittenSoFar, len);	
+			//DEBUG
+			System.out.print("[2pos = " + dataWrittenSoFar + ", len = " + len + "]");
 
 			if (CurrentMapRemainingByte > 0) {
 				// insert part of original data
@@ -474,6 +480,7 @@ public class IndexCache implements Closeable {
 
 			// add index
 			level = 20;
+			
 			_setItemAddress ( index.serialise() );
 
 			return NoOfEntryInIndex;
@@ -482,14 +489,17 @@ public class IndexCache implements Closeable {
 		return -1;  
 	}
 
-	public byte[] get ( long handler ) {
+	public byte[] get ( long handler ) throws Exception {
 		/* TODO:
 		 * - Can we use scattered read here?
 		 * - Validate handler input
 		 */
 		// read the index
 		ItemAddress itemAddress = _getItemAddress( handler );
-
+		// DEBUG
+		System.out.print("[3pos = " + itemAddress.getPosition() + ", len = " + itemAddress.getSize() + "]");
+		System.out.println ();
+		
 		// how many bytes to read
 		int bytesToRead  = itemAddress.getSize();
 
@@ -504,7 +514,7 @@ public class IndexCache implements Closeable {
 		int offset = (int) (itemAddress.getPosition() % lBlockSize );
 
 		// determine how many maps do we need to read
-		int noMapsToRead = (int) Math.ceil( (double)bytesToRead / (double)lBlockSize );
+		int noMapsToRead = (int) Math.ceil( (double)(offset + bytesToRead) / (double)lBlockSize );
 
 		int start = 0;
 		for ( int i = 1; i <= noMapsToRead; i++ ) {
@@ -522,7 +532,11 @@ public class IndexCache implements Closeable {
 			// buffer, starting at the current position of this map and at the given "start" 
 			// in the buffer. The position of this map is then also incremented by "length".
 			data_maps.get(mapNo - 1).get(buffer, start, len);
-
+			
+			
+			// DEBUG
+			System.out.println("[mapNo = " + mapNo + ", Offset = " + offset + ", start = " + start + ", len = " + len + "] buffer: [" + (new String(buffer, "UTF-16BE")) + "]");
+			
 			mapNo++;
 			offset = 0;
 			start += len;
